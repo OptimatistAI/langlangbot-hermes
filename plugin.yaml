@@ -1,0 +1,28 @@
+name: langlangbot
+label: LangLangBot
+kind: platform
+version: 0.1.0
+description: Hermes platform adapter for LangLangBot (Operator chat)
+author: Optimatist
+homepage: https://github.com/OptimatistAI/langlangbot-hermes
+optional_env:
+  - name: LANGLANGBOT_SIDECAR_URL
+    description: "LangLangBot gateway base URL (https://127.0.0.1:9528)"
+    prompt: "LangLangBot sidecar URL"
+    password: false
+  - name: LANGLANGBOT_PLUGIN_TOKEN
+    description: "Optional plugin auth token for LangLangBot inbound/outbound routes"
+    prompt: "LangLangBot plugin token (or empty)"
+    password: true
+provides_tools:
+  - langlangbot_connection_current
+  - langlangbot_operator_runtime_status
+provides_hooks:
+  - on_stream_start
+  - on_stream_delta
+  - on_stream_end
+  - pre_tool_call
+  - post_tool_call
+  - on_session_start
+  - pre_approval_request
+  - post_approval_response

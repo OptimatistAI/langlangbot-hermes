@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "langlangbot-hermes"
+version = "0.1.0"
+description = "Hermes platform adapter for LangLangBot sidecar"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+authors = [{ name = "Optimatist Corp" }]
+keywords = ["hermes", "langlangbot"]
+classifiers = [
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+]
+
+[project.urls]
+Homepage = "https://github.com/OptimatistAI/langlangbot-hermes"
+Repository = "https://github.com/OptimatistAI/langlangbot-hermes"
+
+[project.entry-points."hermes_agent.plugins"]
+langlangbot = "langlangbot_hermes"
+
+[tool.setuptools]
+packages = ["langlangbot_hermes"]
+
+[tool.setuptools.package-dir]
+langlangbot_hermes = "."
+
+[tool.setuptools.package-data]
+langlangbot_hermes = ["plugin.yaml"]
