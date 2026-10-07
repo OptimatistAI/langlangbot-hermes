@@ -18,7 +18,7 @@ from approvals import (
     pending_payload,
 )
 from config import apply_yaml_config, check_requirements, env_enablement
-from inbound import InboundAttachmentBuffer
+from inbound import InboundAttachmentBuffer, claim_turn_decision
 from management import (
     ManagementError,
     context_usage_with_cache,
@@ -28,7 +28,12 @@ from management import (
     parse_model_selector,
     session_model_command,
 )
-from sidecar import InboundAttachmentEvent, InboundUserMessage, parse_inbound_event
+from sidecar import (
+    InboundAttachmentEvent,
+    InboundUserMessage,
+    LanglangbotSidecarClient,
+    parse_inbound_event,
+)
 import hooks
 import tools
 
@@ -158,6 +163,17 @@ class InboundTests(unittest.TestCase):
         self.assertIn("ready for analysis", ready.text)
         self.assertEqual(ready.ack_seqs, ["1", "2"])
 
+    def test_accept_claim_runs_a_turn_once(self) -> None:
+        self.assertEqual(
+            claim_turn_decision({"accepted": True, "duplicate": False}),
+            "accepted",
+        )
+        self.assertEqual(
+            claim_turn_decision({"accepted": False, "duplicate": True}),
+            "duplicate",
+        )
+        self.assertEqual(claim_turn_decision({}), "rejected")
+
     def test_available_attachment_keeps_user_seq_until_terminal(self) -> None:
         buf = InboundAttachmentBuffer()
         self.assertIsNone(
@@ -192,6 +208,50 @@ class InboundTests(unittest.TestCase):
         )
         pending = buf._pending["c1:m1"]
         self.assertEqual(pending.pending_ack_seqs, ["1", "2"])
+
+    def test_accept_duplicate_does_not_start_another_turn(self) -> None:
+        self.assertEqual(
+            claim_turn_decision({"accepted": True, "duplicate": False}),
+            "accepted",
+        )
+        self.assertEqual(
+            claim_turn_decision({"accepted": False, "duplicate": True}),
+            "duplicate",
+        )
+
+    def test_attachment_batch_accepts_the_whole_seq_set(self) -> None:
+        captured: dict[str, object] = {}
+
+        class _Response:
+            def __enter__(self) -> "_Response":
+                return self
+
+            def __exit__(self, *_args: object) -> None:
+                return None
+
+            def read(self) -> bytes:
+                return b'{"accepted": true, "duplicate": false}'
+
+        def _urlopen(req: object, timeout: float | None = None) -> _Response:
+            captured["url"] = req.full_url  # type: ignore[attr-defined]
+            captured["body"] = json.loads(req.data.decode("utf-8"))  # type: ignore[attr-defined]
+            return _Response()
+
+        client = LanglangbotSidecarClient("https://127.0.0.1:9538", "token")
+        with mock.patch.object(client, "_urlopen", _urlopen):
+            payload = client.accept_inbound("conv-1", "msg-1", ["1", "4", "5"])
+        self.assertEqual(payload["accepted"], True)
+        self.assertEqual(payload["duplicate"], False)
+        self.assertTrue(str(captured["url"]).endswith("/v1/inbound/accept"))
+        self.assertEqual(
+            captured["body"],
+            {
+                "conversation_id": "conv-1",
+                "message_id": "msg-1",
+                "seqs": ["1", "4", "5"],
+            },
+        )
+        self.assertEqual(claim_turn_decision(payload), "accepted")
 
 
 class ApprovalTests(unittest.TestCase):
