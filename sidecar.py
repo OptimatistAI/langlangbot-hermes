@@ -124,8 +124,27 @@ class LanglangbotSidecarClient:
             body,
         )
 
-    def ack_inbound(self, cursor: str) -> None:
-        self._json_request("POST", "/v1/inbound/ack", {"cursor": cursor})
+    def accept_inbound(
+        self,
+        conversation_id: str,
+        message_id: str,
+        seqs: list[str],
+    ) -> dict[str, Any]:
+        """Claim one message before a model turn.
+
+        The first response has ``accepted`` true. A later claim is
+        ``duplicate`` and still drops ``seqs``. After the claim commits, a
+        crash before the model runs does not replay the message.
+        """
+        return self._json_request(
+            "POST",
+            "/v1/inbound/accept",
+            {
+                "conversation_id": conversation_id,
+                "message_id": message_id,
+                "seqs": seqs,
+            },
+        )
 
     def update_runtime_status(
         self,

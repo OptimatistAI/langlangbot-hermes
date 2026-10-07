@@ -36,7 +36,7 @@ try:
         validate_config,
     )
     from .hooks import bind_adapter, register_hooks
-    from .inbound import InboundAttachmentBuffer, max_ack_seq
+    from .inbound import InboundAttachmentBuffer, claim_turn_decision
     from .management import (
         ManagementError,
         build_status,
@@ -71,7 +71,7 @@ except ImportError:
         validate_config,
     )
     from hooks import bind_adapter, register_hooks  # type: ignore
-    from inbound import InboundAttachmentBuffer, max_ack_seq  # type: ignore
+    from inbound import InboundAttachmentBuffer, claim_turn_decision  # type: ignore
     from management import (  # type: ignore
         ManagementError,
         build_status,
@@ -771,7 +771,11 @@ class LanglangbotAdapter(BasePlatformAdapter):
     async def _handle_inbound_event(self, event: Any) -> None:
         if isinstance(event, InboundUserMessage):
             if event.message_id in self._dispatched_message_ids:
-                await self._ack_seqs([event.seq] if event.seq else [])
+                await self._claim_turn(
+                    event.conversation_id,
+                    event.message_id,
+                    [event.seq] if event.seq else [],
+                )
                 return
             ready = self._inbound.on_user_message(event)
             if ready is None:
@@ -783,17 +787,36 @@ class LanglangbotAdapter(BasePlatformAdapter):
         if isinstance(event, InboundAttachmentEvent):
             ready = self._inbound.on_attachment(event)
             if ready is None:
-                # Keep the user_message seq unacked until every attachment is
-                # terminal. Sidecar ack is cursor-based (seq <= cursor).
+                # Keep the user_message seq until every attachment is terminal,
+                # then accept that whole seq set in one claim.
                 return
             if not ready.parts and ready.ack_seqs and not ready.text:
-                await self._ack_seqs(ready.ack_seqs)
+                if ready.message_id in self._dispatched_message_ids:
+                    await self._claim_turn(
+                        ready.conversation_id,
+                        ready.message_id,
+                        ready.ack_seqs,
+                    )
                 return
             await self._dispatch_ready(ready)
 
     async def _dispatch_ready(self, ready: Any) -> None:
-        if ready.message_id in self._dispatched_message_ids and ready.ack_seqs:
-            await self._ack_seqs(ready.ack_seqs)
+        if ready.message_id in self._dispatched_message_ids:
+            await self._claim_turn(
+                ready.conversation_id,
+                ready.message_id,
+                ready.ack_seqs,
+            )
+            return
+        decision = await self._claim_turn(
+            ready.conversation_id,
+            ready.message_id,
+            ready.ack_seqs,
+        )
+        if decision == "duplicate":
+            self._dispatched_message_ids.add(ready.message_id)
+            return
+        if decision != "accepted":
             return
         self._dispatched_message_ids.add(ready.message_id)
         pending = self._pending_user_messages.setdefault(ready.conversation_id, deque())
@@ -812,8 +835,28 @@ class LanglangbotAdapter(BasePlatformAdapter):
             await self.handle_message(event)
         except Exception as err:
             await self._fail_turn(ready.conversation_id, ready.message_id, err)
-        if await self._ack_seqs(ready.ack_seqs):
-            self._dispatched_message_ids.discard(ready.message_id)
+            return
+
+    async def _claim_turn(
+        self,
+        conversation_id: str,
+        message_id: str,
+        seqs: list[str],
+    ) -> str:
+        try:
+            payload = await asyncio.to_thread(
+                self._client.accept_inbound,
+                conversation_id,
+                message_id,
+                seqs,
+            )
+        except Exception as err:
+            # Fail closed on every accept failure, including a 404 from a
+            # sidecar without the endpoint: do not start the turn; the
+            # message stays queued and replays on reconnect.
+            logger.warning("inbound accept failed: %s", err)
+            return "rejected"
+        return claim_turn_decision(payload if isinstance(payload, dict) else {})
 
     def _remember_gateway_session(
         self,
@@ -829,17 +872,6 @@ class LanglangbotAdapter(BasePlatformAdapter):
             return
         if session_key:
             self._conversation_to_gateway_session[conversation_id] = str(session_key)
-
-    async def _ack_seqs(self, seqs: list[str]) -> bool:
-        cursor = max_ack_seq([seq for seq in seqs if seq])
-        if not cursor:
-            return True
-        try:
-            await asyncio.to_thread(self._client.ack_inbound, cursor)
-            return True
-        except Exception as err:
-            logger.warning("inbound ack failed: %s", err)
-            return False
 
 
 def _conversation_id(chat_id: str) -> str:
