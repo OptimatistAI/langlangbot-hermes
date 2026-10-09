@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+import os
 import ssl
+from collections.abc import Iterator
 from dataclasses import dataclass, field
-from typing import Any
-from urllib import request
+from typing import IO, Any
+from urllib import error, request
 from urllib.parse import quote, urlparse
 
 try:
@@ -16,7 +18,7 @@ except ImportError:
 
 
 _TERMINAL_ATTACHMENT_STATUSES = frozenset({"ready", "failed"})
-_AGENT_RUNTIME_KIND = "hermes"
+AGENT_RUNTIME_KIND = "hermes"
 _DEFAULT_ACCOUNT_ID = "default"
 
 
@@ -46,6 +48,53 @@ class InboundAttachmentEvent:
 InboundEvent = InboundUserMessage | InboundAttachmentEvent
 
 
+class RuntimeMismatchError(RuntimeError):
+    """Sidecar rejected this adapter with a permanent 409.
+
+    Covers ``runtime_mismatch`` (wrong kind), ``runtime_instance_mismatch``
+    (same kind, different live PID), and ``runtime_pid_required`` (kind
+    without PID). Poll loops stop instead of retrying; the host adapter
+    stays up and only the langlangbot bridge goes idle.
+    """
+
+    def __init__(
+        self,
+        paired_runtime: str,
+        received_runtime: str | None = None,
+        *,
+        reason: str = "runtime_mismatch",
+        active_pid: int | None = None,
+        detail: str | None = None,
+    ) -> None:
+        if detail is None:
+            if reason == "runtime_instance_mismatch":
+                detail = (
+                    f"sidecar is already owned by another {paired_runtime} "
+                    f"process (pid {active_pid}); stop that instance or wait "
+                    f"for it to exit"
+                    if active_pid is not None
+                    else (
+                        f"sidecar is already owned by another "
+                        f"{paired_runtime} process"
+                    )
+                )
+            elif reason == "runtime_pid_required":
+                detail = (
+                    f"sidecar requires X-Langlangbot-Runtime-Pid "
+                    f"(paired with {paired_runtime})"
+                )
+            else:
+                detail = (
+                    f"sidecar is paired with {paired_runtime}; "
+                    f"re-pair with --runtime {paired_runtime}"
+                )
+        super().__init__(detail)
+        self.paired_runtime = paired_runtime
+        self.received_runtime = received_runtime
+        self.reason = reason
+        self.active_pid = active_pid
+
+
 def any_pending_attachments(parts: list[dict[str, Any]] | None) -> bool:
     for part in parts or []:
         if part.get("type") != "attachment":
@@ -69,9 +118,15 @@ def local_paths_from_parts(parts: list[dict[str, Any]] | None) -> list[str]:
 
 
 class LanglangbotSidecarClient:
-    def __init__(self, base_url: str, plugin_token: str | None = None) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        plugin_token: str | None = None,
+        runtime_kind: str | None = None,
+    ) -> None:
         self.base_url = (base_url or DEFAULT_SIDECAR_URL).rstrip("/")
         self.plugin_token = plugin_token
+        self.runtime_kind = (runtime_kind or "").strip() or None
         self._ssl_context = _loopback_insecure_ssl_context(self.base_url)
 
     def _urlopen(self, req: request.Request, timeout: float | None):
@@ -83,6 +138,11 @@ class LanglangbotSidecarClient:
             headers["Accept"] = accept
         if self.plugin_token:
             headers["X-Langlangbot-Plugin-Token"] = self.plugin_token
+        if self.runtime_kind:
+            headers["X-Langlangbot-Runtime-Kind"] = self.runtime_kind
+        # Same-kind instance exclusivity: the sidecar records the first live
+        # PID and 409s any other process of the paired kind.
+        headers["X-Langlangbot-Runtime-Pid"] = str(os.getpid())
         return headers
 
     def health(self) -> dict[str, Any]:
@@ -124,8 +184,27 @@ class LanglangbotSidecarClient:
             body,
         )
 
-    def ack_inbound(self, cursor: str) -> None:
-        self._json_request("POST", "/v1/inbound/ack", {"cursor": cursor})
+    def accept_inbound(
+        self,
+        conversation_id: str,
+        message_id: str,
+        seqs: list[str],
+    ) -> dict[str, Any]:
+        """Claim one message before a model turn.
+
+        The first response has ``accepted`` true. A later claim is
+        ``duplicate`` and still drops ``seqs``. After the claim commits, a
+        crash before the model runs does not replay the message.
+        """
+        return self._json_request(
+            "POST",
+            "/v1/inbound/accept",
+            {
+                "conversation_id": conversation_id,
+                "message_id": message_id,
+                "seqs": seqs,
+            },
+        )
 
     def update_runtime_status(
         self,
@@ -144,7 +223,7 @@ class LanglangbotSidecarClient:
                 "connected": connected,
                 "agent_runtime_ready": agent_runtime_ready,
                 "runtime_name": AGENT_RUNTIME_NAME,
-                "kind": _AGENT_RUNTIME_KIND,
+                "kind": AGENT_RUNTIME_KIND,
                 "host_version": host_version,
                 "adapter_version": adapter_version,
                 "account_id": _DEFAULT_ACCOUNT_ID,
@@ -244,11 +323,17 @@ class LanglangbotSidecarClient:
             f"/v1/plugin/connection/current?conversation_id={quote(conversation_id, safe='')}",
         )
 
-    def iter_sse(self, path: str) -> Any:
+    def iter_sse(self, path: str) -> IO[bytes]:
         url = f"{self.base_url}{path}"
         headers = self._headers("text/event-stream")
         req = request.Request(url, headers=headers, method="GET")
-        return self._urlopen(req, timeout=None)
+        try:
+            return self._urlopen(req, timeout=None)
+        except error.HTTPError as err:
+            # SSE endpoints return the 409 before upgrading the stream; the
+            # generic error path here would otherwise look transient and be
+            # retried forever by the poll loops.
+            raise self._runtime_mismatch_or_reraise(err) from err
 
     def stream_named_events(self, path: str):
         with self.iter_sse(path) as resp:
@@ -280,7 +365,7 @@ class LanglangbotSidecarClient:
             if event_name == "management_request":
                 yield payload
 
-    def stream_inbound(self) -> Any:
+    def stream_inbound(self) -> Iterator[InboundEvent]:
         for event_name, event_id, payload in self.stream_named_events(
             "/v1/inbound/events"
         ):
@@ -315,11 +400,45 @@ class LanglangbotSidecarClient:
             headers=headers or self._headers(),
             method=method,
         )
-        with self._urlopen(req, timeout=30) as resp:
-            raw = resp.read().decode("utf-8")
-            if not raw:
-                return {}
-            return json.loads(raw)
+        try:
+            with self._urlopen(req, timeout=30) as resp:
+                raw = resp.read().decode("utf-8")
+                if not raw:
+                    return {}
+                return json.loads(raw)
+        except error.HTTPError as err:
+            raise self._runtime_mismatch_or_reraise(err) from err
+
+    def _runtime_mismatch_or_reraise(self, err: error.HTTPError) -> Exception:
+        """Surface permanent 409 runtime rejections as the typed failure."""
+        if err.code == 409:
+            try:
+                payload = json.loads(err.read().decode("utf-8"))
+            except (ValueError, UnicodeDecodeError):
+                payload = {}
+            if isinstance(payload, dict):
+                code = payload.get("error")
+                paired = str(payload.get("paired_runtime") or "another runtime")
+                if code == "runtime_mismatch":
+                    received = payload.get("received_runtime")
+                    return RuntimeMismatchError(
+                        paired,
+                        received if isinstance(received, str) else None,
+                        reason="runtime_mismatch",
+                    )
+                if code == "runtime_instance_mismatch":
+                    active = payload.get("active_pid")
+                    return RuntimeMismatchError(
+                        paired,
+                        reason="runtime_instance_mismatch",
+                        active_pid=active if isinstance(active, int) else None,
+                    )
+                if code == "runtime_pid_required":
+                    return RuntimeMismatchError(
+                        paired,
+                        reason="runtime_pid_required",
+                    )
+        return err
 
 
 def parse_inbound_event(

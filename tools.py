@@ -14,7 +14,7 @@ try:
     )
     from .hooks import active_conversation_id, active_runtime_status
     from .management import build_status, default_model_from_config
-    from .sidecar import LanglangbotSidecarClient
+    from .sidecar import AGENT_RUNTIME_KIND, LanglangbotSidecarClient, RuntimeMismatchError
 except ImportError:
     from config import (  # type: ignore
         adapter_version,
@@ -24,7 +24,11 @@ except ImportError:
     )
     from hooks import active_conversation_id, active_runtime_status  # type: ignore
     from management import build_status, default_model_from_config  # type: ignore
-    from sidecar import LanglangbotSidecarClient  # type: ignore
+    from sidecar import (  # type: ignore
+        AGENT_RUNTIME_KIND,
+        LanglangbotSidecarClient,
+        RuntimeMismatchError,
+    )
 
 
 TOOL_SCHEMA = {
@@ -47,7 +51,11 @@ def _client() -> LanglangbotSidecarClient:
         raise RuntimeError(
             "LANGLANGBOT_SIDECAR_URL is not configured; pair the sidecar first"
         )
-    return LanglangbotSidecarClient(url, configured_plugin_token() or None)
+    # runtime_kind keeps the tool client's requests consistent with the
+    # adapter's: the sidecar kind-gates plugin surfaces on it.
+    return LanglangbotSidecarClient(
+        url, configured_plugin_token() or None, runtime_kind=AGENT_RUNTIME_KIND
+    )
 
 
 def _conversation_id(args: dict[str, Any] | None, session_id: str | None = None) -> str:
@@ -67,7 +75,20 @@ def langlangbot_connection_current(
     **kwargs: Any,
 ) -> str:
     conversation_id = _conversation_id(args, kwargs.get("session_id"))
-    result = _client().get_plugin_connection_current(conversation_id)
+    try:
+        result = _client().get_plugin_connection_current(conversation_id)
+    except RuntimeMismatchError as err:
+        # Soft-fail: never let a sidecar exclusivity rejection interrupt the
+        # Hermes agent turn. The adapter itself already idles on mismatch.
+        return json.dumps(
+            {
+                "ok": False,
+                "error": err.reason,
+                "message": str(err),
+                "paired_runtime": err.paired_runtime,
+            },
+            ensure_ascii=False,
+        )
     return json.dumps(result, ensure_ascii=False, default=str)
 
 
