@@ -29,26 +29,6 @@ def upload_key(conversation_id: str, upload_id: str) -> str:
     return f"{conversation_id}:{upload_id}"
 
 
-def max_ack_seq(seqs: list[str]) -> str | None:
-    if not seqs:
-        return None
-    best = seqs[0]
-    best_num = _as_int(best)
-    for seq in seqs[1:]:
-        number = _as_int(seq)
-        if number is not None and (best_num is None or number > best_num):
-            best = seq
-            best_num = number
-    return best
-
-
-def _as_int(value: str) -> int | None:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
-
-
 def remember_ack_seq(seqs: list[str], seq: str | None) -> None:
     trimmed = (seq or "").strip()
     if trimmed and trimmed not in seqs:
@@ -295,3 +275,17 @@ class InboundAttachmentBuffer:
             media_urls=local_paths_from_parts(handle.parts),
             ack_seqs=list(handle.pending_ack_seqs),
         )
+
+
+def claim_turn_decision(payload: dict[str, Any]) -> str:
+    """Classify a durable accept response.
+
+    ``duplicate`` means the message was already claimed, including when the
+    adaptor crashed after accept and before the model ran. That message is not
+    replayed; the user sends it again.
+    """
+    if payload.get("duplicate") is True:
+        return "duplicate"
+    if payload.get("accepted") is True:
+        return "accepted"
+    return "rejected"
