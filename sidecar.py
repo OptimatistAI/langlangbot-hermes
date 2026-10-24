@@ -160,8 +160,12 @@ class LanglangbotSidecarClient:
         conversation_id: str,
         text: str,
         parts: list[dict[str, Any]] | None = None,
+        *,
+        proactive: bool = False,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {"text": text, "parts": parts or []}
+        if proactive:
+            body["proactive"] = True
         return self._json_request(
             "POST",
             f"/v1/conversations/{conversation_id}/outbound/message",

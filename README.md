@@ -6,10 +6,11 @@ client.
 
 ## Install (production)
 
-Sidecar + adapter (picks Hermes when `hermes` is on PATH and `openclaw` is not):
+Sidecar + adapter (default installs Hermes whenever it is detected; `--runtime hermes` installs only this adapter):
 
 ```bash
-curl -fsSL https://optimatist.ai/langlangbot/install.sh | bash -s -- --runtime hermes
+curl -fsSL -o "$HOME/langlangbot-install.sh" https://optimatist.ai/langlangbot/install.sh
+bash "$HOME/langlangbot-install.sh" --runtime hermes
 langlangbot pair ABC2-T9K4
 ```
 
@@ -33,14 +34,14 @@ gateway:
     langlangbot:
       enabled: true
       sidecar_url: "https://127.0.0.1:9528"
-      plugin_token: "optional-shared-token"
+      plugin_token: "example"
 ```
 
 Or via environment (`env` wins over YAML):
 
 ```bash
 export LANGLANGBOT_SIDECAR_URL=https://127.0.0.1:9528
-export LANGLANGBOT_PLUGIN_TOKEN=optional-shared-token
+export LANGLANGBOT_PLUGIN_TOKEN=example
 ```
 
 Then `hermes gateway status` should list LangLangBot only when a sidecar URL is
