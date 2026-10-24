@@ -207,11 +207,13 @@ class LanglangbotAdapter(BasePlatformAdapter):
         user_message_id = (
             None if is_interim else self._pop_pending_message(conversation_id)
         )
+        proactive = user_message_id is None and not is_interim
         try:
             result = await asyncio.to_thread(
                 self._client.send_message,
                 conversation_id,
                 content,
+                proactive=proactive,
             )
         except Exception as err:
             if is_interim:
@@ -402,6 +404,7 @@ class LanglangbotAdapter(BasePlatformAdapter):
             error = f"remote media is not supported: {local_path}"
             await self._fail_turn(conversation_id, user_message_id, error)
             return SendResult(success=False, message_id="")
+        proactive = user_message_id is None
         try:
             result = await asyncio.to_thread(
                 send_outbound_files,
@@ -409,6 +412,7 @@ class LanglangbotAdapter(BasePlatformAdapter):
                 conversation_id,
                 [local_path],
                 caption,
+                proactive=proactive,
             )
         except Exception as err:
             await self._fail_turn(conversation_id, user_message_id, err)

@@ -108,6 +108,8 @@ def send_outbound_files(
     conversation_id: str,
     local_paths: list[str],
     caption: str | None = None,
+    *,
+    proactive: bool = False,
 ) -> dict[str, Any]:
     parts: list[dict[str, Any]] = []
     for local_path in local_paths:
@@ -121,5 +123,6 @@ def send_outbound_files(
         conversation_id,
         resolve_caption(caption, local_paths),
         parts=parts,
+        proactive=proactive,
     )
     return {"message_id": result.get("message_id", ""), "parts": parts}

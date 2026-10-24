@@ -55,13 +55,30 @@ def load_yaml_file(path: Path) -> dict[str, Any]:
     return loaded if isinstance(loaded, dict) else {}
 
 
+def _manifest_version() -> str:
+    """Version Hermes prints in `plugins list` (`plugin.yaml`)."""
+    path = Path(__file__).resolve().parent / "plugin.yaml"
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return ""
+    for line in lines:
+        if line.startswith("version:"):
+            return line.split(":", 1)[1].strip().strip("'\"")
+    return ""
+
+
 def adapter_version() -> str:
     global _CACHED_ADAPTER_VERSION
     if _CACHED_ADAPTER_VERSION is None:
-        try:
-            _CACHED_ADAPTER_VERSION = metadata.version("langlangbot-hermes")
-        except metadata.PackageNotFoundError:
-            _CACHED_ADAPTER_VERSION = "0.1.0"
+        manifest = _manifest_version()
+        if manifest:
+            _CACHED_ADAPTER_VERSION = manifest
+        else:
+            try:
+                _CACHED_ADAPTER_VERSION = metadata.version("langlangbot-hermes")
+            except metadata.PackageNotFoundError:
+                _CACHED_ADAPTER_VERSION = "0.1.0"
     return _CACHED_ADAPTER_VERSION
 
 

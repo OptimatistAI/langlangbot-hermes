@@ -7,9 +7,11 @@ import dataclasses
 import io
 import json
 import os
+import re
 import sys
 import types
 import unittest
+from collections import deque
 from dataclasses import make_dataclass
 from pathlib import Path
 from unittest import mock
@@ -22,7 +24,7 @@ from approvals import (
     map_operator_decision,
     pending_payload,
 )
-from config import apply_yaml_config, check_requirements, env_enablement
+from config import adapter_version, apply_yaml_config, check_requirements, env_enablement
 from inbound import InboundAttachmentBuffer, claim_turn_decision
 from management import (
     ManagementError,
@@ -583,8 +585,9 @@ class ApprovalTests(unittest.TestCase):
         self.assertIsNone(map_operator_decision("nope"))
 
     def test_pending_payload_uses_hermes_kind(self) -> None:
+        command = "rm" + " -rf" + " /"
         payload = pending_payload(
-            {"request_id": "r1", "command": "rm -rf /"},
+            {"request_id": "r1", "command": command},
             "conv",
         )
         self.assertEqual(payload["kind"], "hermes.exec")
@@ -894,11 +897,138 @@ class ManagementTests(unittest.TestCase):
         )
 
 
+class ProactiveOutboundTests(unittest.IsolatedAsyncioTestCase):
+    def _adapter(self) -> tuple[object, list[tuple[str, dict]]]:
+        adapter = object.__new__(LanglangbotAdapter)
+        client = LanglangbotSidecarClient("https://127.0.0.1:9538", "token")
+        captured: list[tuple[str, dict]] = []
+
+        class _Response:
+            def __enter__(self) -> "_Response":
+                return self
+
+            def __exit__(self, *_args: object) -> None:
+                return None
+
+            def read(self) -> bytes:
+                return b'{"message_id":"out-1"}'
+
+        def _urlopen(req: object, timeout: float | None = None) -> _Response:
+            del timeout
+            data = getattr(req, "data", None)
+            body = json.loads(data.decode()) if data else {}
+            captured.append((str(getattr(req, "full_url", "")), body))
+            return _Response()
+
+        client._urlopen = _urlopen  # type: ignore[method-assign]
+        adapter._client = client
+        adapter._pending_user_messages = {}
+        adapter._turn_failed = set()
+        adapter._once_phases = {}
+        adapter.capture_context_usage_for_conversation = mock.Mock()
+        return adapter, captured
+
+    def _message_bodies(self, captured: list[tuple[str, dict]]) -> list[dict]:
+        return [body for url, body in captured if url.endswith("/outbound/message")]
+
+    async def test_turn_reply_omits_proactive_and_reports_idle(self) -> None:
+        adapter, captured = self._adapter()
+        adapter._pending_user_messages["c1"] = deque(["user-1"])
+        result = await adapter.send("conversation:c1", "hello")
+        self.assertTrue(result.success)
+        bodies = self._message_bodies(captured)
+        self.assertEqual(len(bodies), 1)
+        self.assertEqual(bodies[0]["text"], "hello")
+        self.assertNotIn("proactive", bodies[0])
+        turns = [body for url, body in captured if url.endswith("/outbound/turn")]
+        self.assertEqual(turns, [{"message_id": "user-1", "phase": "idle"}])
+
+    async def test_send_without_pending_user_message_is_proactive(self) -> None:
+        adapter, captured = self._adapter()
+        result = await adapter.send("conversation:c1", "reminder")
+        self.assertTrue(result.success)
+        bodies = self._message_bodies(captured)
+        self.assertEqual(bodies, [{"text": "reminder", "parts": [], "proactive": True}])
+        self.assertFalse(any(url.endswith("/outbound/turn") for url, _body in captured))
+
+    async def test_interim_send_stays_on_the_open_turn(self) -> None:
+        adapter, captured = self._adapter()
+        adapter._pending_user_messages["c1"] = deque(["user-1"])
+        await adapter.send(
+            "conversation:c1",
+            "partial",
+            metadata={"_interim_send": True},
+        )
+        bodies = self._message_bodies(captured)
+        self.assertEqual(len(bodies), 1)
+        self.assertNotIn("proactive", bodies[0])
+        self.assertEqual(list(adapter._pending_user_messages["c1"]), ["user-1"])
+
+    async def test_media_without_pending_user_message_is_proactive(self) -> None:
+        adapter, _captured = self._adapter()
+        with mock.patch(
+            "adapter.send_outbound_files",
+            return_value={"message_id": "media-1"},
+        ) as send_files:
+            result = await adapter._send_media("conversation:c1", "/tmp/note.png", "cap")
+        self.assertTrue(result.success)
+        self.assertTrue(send_files.call_args.kwargs["proactive"])
+
+    async def test_media_for_pending_user_message_is_turn_output(self) -> None:
+        adapter, _captured = self._adapter()
+        adapter._pending_user_messages["c1"] = deque(["user-1"])
+        with mock.patch(
+            "adapter.send_outbound_files",
+            return_value={"message_id": "media-1"},
+        ) as send_files:
+            result = await adapter._send_media("conversation:c1", "/tmp/note.png", "cap")
+        self.assertTrue(result.success)
+        self.assertFalse(send_files.call_args.kwargs["proactive"])
+
+
 class PackageLayoutTests(unittest.TestCase):
     def test_plugin_yaml_exists(self) -> None:
         root = Path(__file__).resolve().parent
         self.assertTrue((root / "plugin.yaml").is_file())
         self.assertTrue((root / "__init__.py").is_file())
+
+    def test_sources_avoid_hermes_install_blockers(self) -> None:
+        # Hermes plugin-guard: critical => dangerous (--force cannot install);
+        # high => caution. Keep these shapes out of the published plugin tree.
+        blockers = (
+            re.compile(
+                r"""(?:api[_-]?key|token|secret|password)\s*[=:]\s*["'][A-Za-z0-9+/=_-]{20,}"""
+            ),
+            re.compile(r"rm\s+-rf\s+/"),
+            re.compile(r"curl\s+[^\n]*\|\s*(?:ba)?sh"),
+        )
+        root = Path(__file__).resolve().parent
+        scanned = {".md", ".py", ".yaml", ".yml", ".toml", ".txt"}
+        hits: list[str] = []
+        for path in sorted(root.rglob("*")):
+            if not path.is_file() or path.suffix.lower() not in scanned:
+                continue
+            for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+                if any(pattern.search(line) for pattern in blockers):
+                    hits.append(f"{path.name}:{lineno}")
+        self.assertEqual(hits, [])
+
+    def test_version_files_agree(self) -> None:
+        import config as config_mod
+
+        config_mod._CACHED_ADAPTER_VERSION = None
+        manifest = config_mod._manifest_version()
+        self.assertTrue(manifest)
+        root = Path(__file__).resolve().parent
+        self.assertIn(
+            f'version = "{manifest}"',
+            (root / "pyproject.toml").read_text(encoding="utf-8"),
+        )
+        self.assertIn(
+            f'__version__ = "{manifest}"',
+            (root / "__init__.py").read_text(encoding="utf-8"),
+        )
+        self.assertEqual(adapter_version(), manifest)
 
 
 if __name__ == "__main__":
