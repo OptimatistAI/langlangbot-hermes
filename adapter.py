@@ -985,9 +985,14 @@ def register(ctx) -> None:
         apply_yaml_config_fn=apply_yaml_config,
         emoji="📱",
         platform_hint=(
-            "You are chatting with a LangLang Operator via LangLangBot. "
-            "Keep replies concise and actionable. Operator only renders reply "
-            "text; restate any tool output the user asked for."
+            "You are chatting with a LangLang Operator via LangLangBot, a native mobile chat "
+            "client that renders GitHub-flavoured markdown: headings, bullet and numbered "
+            "lists, nested lists, task lists, tables, blockquotes, inline code, fenced code "
+            "with syntax highlighting, bold/italic/strikethrough, and [links](url). "
+            "Write markdown by default: put tabular comparisons in a real markdown table "
+            "(do not fake columns with spaces) and command or file output in a fenced code "
+            "block with a language tag. Keep replies concise and actionable. "
+            "Operator shows replies as text, so restate any tool output the user asked for."
         ),
         max_message_length=8000,
     )
