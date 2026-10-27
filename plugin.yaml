@@ -1,7 +1,7 @@
 name: langlangbot
 label: LangLangBot
 kind: platform
-version: 0.2.0-rc.4
+version: 0.2.0
 description: Hermes platform adapter for LangLangBot (Operator chat)
 author: Optimatist
 homepage: https://github.com/OptimatistAI/langlangbot-hermes
