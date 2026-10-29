@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "langlangbot-hermes"
-version = "0.2.1-rc.1"
+version = "0.2.1"
 description = "Hermes platform adapter for LangLangBot sidecar"
 readme = "README.md"
 license = { text = "MIT" }
