@@ -7,7 +7,7 @@ before gateway/platform SDKs are available. Adapter code is loaded inside
 
 from __future__ import annotations
 
-__version__ = "0.2.0"
+__version__ = "0.2.1-rc.1"
 
 
 def register(ctx) -> None:
